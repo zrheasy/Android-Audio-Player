@@ -1,25 +1,19 @@
 package com.zrh.audio.player.ui
 
 import android.Manifest
-import android.app.Activity
 import android.content.*
-import android.content.pm.PackageManager
-import android.database.Cursor
 import android.graphics.Rect
 import android.graphics.drawable.ColorDrawable
 import android.net.Uri
-import androidx.appcompat.app.AppCompatActivity
 import android.os.Bundle
 import android.os.IBinder
-import android.provider.MediaStore
-import android.provider.OpenableColumns
+import android.provider.MediaStore.MediaColumns
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.widget.PopupWindow
-import androidx.activity.result.ActivityResultLauncher
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.setMargins
@@ -35,9 +29,13 @@ import com.zrh.audio.player.databinding.PopOptionsBinding
 import com.zrh.audio.player.db.entity.AudioEntity
 import com.zrh.audio.player.service.AudioPlayService
 import com.zrh.audio.player.service.IAudioPlayService
-import com.zrh.audio.player.utils.FileUtils
 import com.zrh.audio.player.utils.dp2px
 import com.zrh.audio.player.utils.toast
+import com.zrh.file.picker.FilePickCallback
+import com.zrh.file.picker.FilePickOptions
+import com.zrh.file.picker.FilePicker
+import com.zrh.file.picker.UriUtils
+import com.zrh.permission.PermissionUtils
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.*
 import java.io.File
@@ -54,33 +52,6 @@ class MainActivity : AppCompatActivity(), AudioListAdapter.OnActionListener {
     private lateinit var mBinding: ActivityMainBinding
 
     private val mAudioAdapter: AudioListAdapter by lazy { AudioListAdapter() }
-    private val audioPermissionLauncher: ActivityResultLauncher<Array<String>> = registerForActivityResult(
-        ActivityResultContracts.RequestMultiplePermissions()
-    ) {
-        if (it.getOrDefault(Manifest.permission.RECORD_AUDIO, false)) {
-            startRecord()
-        } else {
-            toast("Please grant record audio permission!")
-        }
-    }
-    private val sdcardPermissionLauncher: ActivityResultLauncher<Array<String>> = registerForActivityResult(
-        ActivityResultContracts.RequestMultiplePermissions()
-    ) {
-        if (it.getOrDefault(Manifest.permission.WRITE_EXTERNAL_STORAGE, false)) {
-            selectFile()
-        } else {
-            toast("Please grant access media file permission!")
-        }
-    }
-    private val selectFileLauncher: ActivityResultLauncher<Intent> =
-        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-            if (result.resultCode == Activity.RESULT_OK) {
-                val data: Intent = result.data!!
-                if (data.data != null) {
-                    parseAudioInfo(data.data!!)
-                }
-            }
-        }
 
     // 选中的AudioItem
     private var mSelectedAudioItem: AudioListAdapter.AudioItem? = null
@@ -161,9 +132,9 @@ class MainActivity : AppCompatActivity(), AudioListAdapter.OnActionListener {
     private fun initAudioListView() {
         mBinding.rvAudioList.apply {
             val space = dp2px(10)
-            addItemDecoration(object :ItemDecoration(){
+            addItemDecoration(object : ItemDecoration() {
                 override fun getItemOffsets(outRect: Rect, view: View, parent: RecyclerView, state: RecyclerView.State) {
-                    if (parent.getChildAdapterPosition(view) == 0){
+                    if (parent.getChildAdapterPosition(view) == 0) {
                         outRect.top = space
                     }
                     outRect.bottom = space
@@ -215,12 +186,12 @@ class MainActivity : AppCompatActivity(), AudioListAdapter.OnActionListener {
     }
 
     private fun requestPermissionAndRecord() {
-        val granted =
-            ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
-        if (granted) {
-            startRecord()
-        } else {
-            audioPermissionLauncher.launch(arrayOf(Manifest.permission.RECORD_AUDIO))
+        PermissionUtils.requestPermissions(this, arrayOf(Manifest.permission.RECORD_AUDIO)) { _, granted ->
+            if (granted) {
+                startRecord()
+            } else {
+                toast("Please grant record audio permission!")
+            }
         }
     }
 
@@ -248,70 +219,56 @@ class MainActivity : AppCompatActivity(), AudioListAdapter.OnActionListener {
     }
 
     private fun requestPermissionAndSelectFile() {
-        val granted =
-            ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
-        if (granted) {
-            selectFile()
-        } else {
-            sdcardPermissionLauncher.launch(arrayOf(Manifest.permission.WRITE_EXTERNAL_STORAGE))
+        PermissionUtils.requestPermissions(this, arrayOf(Manifest.permission.WRITE_EXTERNAL_STORAGE)) { _, granted ->
+            if (granted) {
+                selectFile()
+            } else {
+                toast("Please grant access media file permission!")
+            }
         }
     }
 
     private fun selectFile() {
-        val i = Intent()
-        i.type = "audio/*"
-        i.putExtra(Intent.EXTRA_MIME_TYPES, arrayListOf("audio/*"))
-        i.action = Intent.ACTION_GET_CONTENT
-        i.addCategory(Intent.CATEGORY_OPENABLE)
-
-        try {
-            selectFileLauncher.launch(i)
-        } catch (e: Exception) {
-            e.printStackTrace()
-            toast("error")
+        val options = FilePickOptions().apply {
+            mimeType = "audio/*"
+            isAllowMultiple = false
         }
+        FilePicker.pick(this, options, object : FilePickCallback {
+            override fun onResult(data: MutableList<Uri>) {
+                parseAudioInfo(data[0])
+            }
+
+            override fun onError(p0: Int, p1: String) {
+
+            }
+        })
     }
 
     private fun parseAudioInfo(uri: Uri) {
         flow {
-            var cursor: Cursor? = null
-            try {
-                val projection = arrayOf(
-                    OpenableColumns.DISPLAY_NAME,
-                    MediaStore.Audio.Media.DURATION,
-                    MediaStore.Audio.Media.SIZE,
-                    MediaStore.Audio.Media.MIME_TYPE
-                )
-                cursor = contentResolver.query(uri, projection, null, null, null) ?: return@flow
-                cursor.moveToFirst()
+            val fields = UriUtils.getMetaInfo(this@MainActivity, uri)
 
-                val mimeType = cursor.getString(cursor.getColumnIndex(MediaStore.Audio.Media.MIME_TYPE)) ?: ""
-                if (!mimeType.startsWith("audio")) return@flow
+            val mimeType = fields[MediaColumns.MIME_TYPE] as String
+            if (!mimeType.startsWith("audio")) return@flow
 
-                val size = cursor.getLong(cursor.getColumnIndex(MediaStore.Audio.Media.SIZE))
-                if (size == 0L) return@flow
+            val size = fields[MediaColumns.SIZE] as Int
+            if (size == 0) return@flow
 
-                val name = cursor.getString(cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)) ?: ""
-                val file =
-                    FileUtils.getFileFromUri(applicationContext, uri, File(filesDir, "audio"), name) ?: return@flow
+            val name = fields[MediaColumns.DISPLAY_NAME] as String
+            val cache = if (externalCacheDir != null) externalCacheDir else cacheDir
+            val file = UriUtils.getFileFromUri(this@MainActivity, uri, File(cache, "picker"))
 
-                var duration = cursor.getInt(cursor.getColumnIndex(MediaStore.Audio.Media.DURATION))
-                if (duration == 0) {
-                    duration = AudioUtils.getDuration(file)
-                }
-                val entity = AudioEntity(name, file.absolutePath, duration, System.currentTimeMillis())
-                emit(entity)
-            } catch (e: Throwable) {
-                e.printStackTrace()
-            } finally {
-                cursor?.close()
-            }
+            val duration =  AudioUtils.getDuration(file)
+
+            val entity = AudioEntity(name, file.absolutePath, duration, System.currentTimeMillis())
+            emit(entity)
         }
             .flowOn(Dispatchers.IO)
             .flatMapConcat { mViewModel.insertAudio(it) }
             .onEach {
                 mAudioAdapter.addItem(0, AudioListAdapter.AudioItem(it))
             }
+            .catch { toast("error: $it") }
             .launchIn(lifecycleScope)
     }
 
@@ -354,7 +311,7 @@ class MainActivity : AppCompatActivity(), AudioListAdapter.OnActionListener {
         mAudioPlayService?.pause()
     }
 
-    override fun onLongClick(view:View, item: AudioListAdapter.AudioItem) {
+    override fun onLongClick(view: View, item: AudioListAdapter.AudioItem) {
         val pop = PopupWindow(this)
         val binding = PopDeleteBinding.inflate(layoutInflater)
         binding.btnDelete.setOnClickListener {
@@ -378,7 +335,7 @@ class MainActivity : AppCompatActivity(), AudioListAdapter.OnActionListener {
         mViewModel.deleteAudio(item.data)
             .onEach {
                 mAudioAdapter.deleteItem(item)
-                if (item == mSelectedAudioItem){
+                if (item == mSelectedAudioItem) {
                     updatePlayInfo(null)
                     updatePlayState(false)
                     updatePlayProgress(0f)
